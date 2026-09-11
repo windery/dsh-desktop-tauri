@@ -22,14 +22,17 @@ if (!/^\d+\.\d+\.\d+/.test(version ?? "")) {
  *
  * The callback form is deliberate: `$1` followed by a version that starts with a
  * digit would be read as `$10`, `$12`, ... and silently splice the wrong group.
- * Throws when the pattern is absent, because a version that quietly did not get
- * stamped is exactly the failure this script exists to prevent.
+ *
+ * The match is checked separately from the write, because "the replacement
+ * changed nothing" is not the same as "there was nothing to replace". Stamping a
+ * tag whose version already matches the manifests is a legitimate no-op — and it
+ * is the *common* case, since a first release usually tags the version that is
+ * already committed. Conflating the two fails precisely there.
  */
 function stamp(file, pattern) {
   const before = readFileSync(file, "utf8");
-  const after = before.replace(pattern, (_match, prefix) => prefix + version);
-  if (after === before) throw new Error(`no version field found in ${file}`);
-  writeFileSync(file, after);
+  if (!pattern.test(before)) throw new Error(`no version field found in ${file}`);
+  writeFileSync(file, before.replace(pattern, (_match, prefix) => prefix + version));
 }
 
 stamp("package.json", /("version":\s*")[^"]+/);
