@@ -11,6 +11,8 @@ mod backend;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::webview::cookie::{Cookie, SameSite};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -25,6 +27,23 @@ const SPLASH_PAGE: &str = "index.html";
 /// Set while a restart is swapping the main window, so the deliberate teardown
 /// of the old window is not mistaken for the user quitting.
 static RESTARTING: AtomicBool = AtomicBool::new(false);
+
+/// Set while the boot path is running, so the serving watch cannot mistake a
+/// restart that is still starting up for a server that has died.
+static BOOTING: AtomicBool = AtomicBool::new(false);
+
+/// Set once the serving watch is running, so repeated boots do not stack one
+/// watcher per attempt.
+static WATCHING: AtomicBool = AtomicBool::new(false);
+
+/// Clears [`BOOTING`] however the boot path leaves, including its early return.
+struct BootGuard;
+
+impl Drop for BootGuard {
+    fn drop(&mut self) {
+        BOOTING.store(false, Ordering::SeqCst);
+    }
+}
 
 /// Shell state: the single harness server this window owns.
 #[derive(Default)]
@@ -163,6 +182,9 @@ fn quit_unless_restarting(app: &tauri::AppHandle) {
 /// harness would have issued itself, from the secret both surfaces already
 /// share. There is no token to find and nothing for the user to paste.
 fn boot(app: tauri::AppHandle) {
+    BOOTING.store(true, Ordering::SeqCst);
+    let _booting = BootGuard;
+
     let port = backend::web_port();
 
     let (url, cookie) = if backend::is_listening(port) {
@@ -206,12 +228,83 @@ fn boot(app: tauri::AppHandle) {
     }
 
     RESTARTING.store(false, Ordering::SeqCst);
+    // Once something is on screen there is a session worth keeping alive.
+    if app.get_webview_window(MAIN_LABEL).is_some() {
+        watch_serving(app.clone());
+    }
     if app.get_webview_window(MAIN_LABEL).is_none() {
         // Nothing to show and nothing to retry into: do not linger headless.
         if app.get_webview_window(SPLASH_LABEL).is_none() {
             app.exit(0);
         }
     }
+}
+
+/// Keep the address the window is showing actually served.
+///
+/// An attached `dsh web` is not ours to supervise: when the terminal that
+/// started it closes, the server goes with it and the window would sit on a dead
+/// page until the user happened to know about ⌘⇧R. One we started ourselves can
+/// die the same way. Both recover identically — re-run the boot path, which by
+/// then finds the port free and takes it over. Because the takeover reuses the
+/// same address and the same harness home, the session cookie a browser already
+/// holds for that origin stays valid, so the browser comes back with it.
+///
+/// Three guards keep it from doing harm: two consecutive misses are required so
+/// a momentary blip is not read as a death; the watch stands down while a boot
+/// is in flight so a deliberate restart is never interrupted; and it gives up
+/// after a few attempts, so a machine that genuinely cannot start a server is
+/// left showing its error rather than restarting forever.
+fn watch_serving(app: tauri::AppHandle) {
+    if WATCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    thread::spawn(move || {
+        const POLL: Duration = Duration::from_millis(2500);
+        const MISSES_BEFORE_RECOVERY: u32 = 2;
+        const MAX_RECOVERIES: u32 = 4;
+        const SETTLE: Duration = Duration::from_secs(12);
+
+        let port = backend::web_port();
+        let mut misses = 0u32;
+        let mut recoveries = 0u32;
+
+        loop {
+            thread::sleep(POLL);
+
+            if backend::is_listening(port) {
+                misses = 0;
+                // Serving again, so whatever we did worked and the budget resets.
+                recoveries = 0;
+                continue;
+            }
+            if BOOTING.load(Ordering::SeqCst) {
+                // A boot in flight is entitled to leave the port briefly free.
+                misses = 0;
+                continue;
+            }
+            misses += 1;
+            if misses < MISSES_BEFORE_RECOVERY {
+                continue;
+            }
+            misses = 0;
+
+            // Nothing left to recover into: the user closed the window.
+            if app.get_webview_window(MAIN_LABEL).is_none()
+                && app.get_webview_window(SPLASH_LABEL).is_none()
+            {
+                break;
+            }
+            if recoveries >= MAX_RECOVERIES {
+                break;
+            }
+            recoveries += 1;
+            restart(app.clone());
+            thread::sleep(SETTLE);
+        }
+
+        WATCHING.store(false, Ordering::SeqCst);
+    });
 }
 
 /// Open the harness interface in its own window.

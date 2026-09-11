@@ -738,8 +738,15 @@ mod tests {
     #[test]
     fn mints_a_cookie_the_harness_accepts() {
         // Printing the cookie lets it be replayed against a live server, which
-        // is the only way to prove the signature matches the harness's own.
-        let (name, value) = mint_session_cookie(3099).expect("a browser-session secret should exist");
+        // is the only way to prove the signature matches the harness's own. The
+        // port is overridable because the authority is signed *into* the cookie,
+        // so a replay has to target the port it was minted for.
+        let port: u16 = std::env::var("DSH_TEST_PORT")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(3099);
+        let (name, value) =
+            mint_session_cookie(port).expect("a browser-session secret should exist");
         println!("COOKIE {name}={value}");
         assert!(name.starts_with("dsh-auth-"));
         assert!(value.starts_with("v1."));
