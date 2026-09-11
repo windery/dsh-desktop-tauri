@@ -169,6 +169,26 @@ cd src-tauri && cargo test   # 单元测试
 | `ui/index.html` | 启动画面（其中的 `ui/icon.png` 是图标的一份副本） |
 | `src-tauri/icons/` | 图标资源；`source.png` 是待展开的 1024 源图 |
 
+### 发布
+
+推一个 `v*` tag 就是全部流程：
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) 会在 arm64 runner 上跑测试、
+构建，并把 DMG 挂到 Release 上。
+
+版本号由 tag 戳进三个清单（`package.json`、`src-tauri/tauri.conf.json`、
+`src-tauri/Cargo.toml`），所以**不需要先手工改版本再打 tag**。这一步不能省：DMG 的文件名
+来自 `tauri.conf.json` 而不是 tag，手工流程下打了 `v0.2.0` 却附上一个仍叫 `0.1.0` 的包，
+是那种要到用户看文件名才发现的不一致。
+
+目前只出 Apple Silicon 构建（`macos-latest` 即 arm64）。要出 Intel 或 universal，改
+workflow 里的 runner / target 即可。
+
 设计取舍、实测数据，以及每个反直觉决定的理由，都在 [`docs/DESIGN.md`](docs/DESIGN.md)。
 
 ## 相关

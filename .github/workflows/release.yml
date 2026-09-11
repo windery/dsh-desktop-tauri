@@ -1,0 +1,90 @@
+name: Release
+
+# A `v*` tag is the entire trigger. The version is stamped from the tag before
+# building, so there is nothing to bump by hand first — see
+# .github/stamp-version.mjs.
+on:
+  push:
+    tags:
+      - "v*"
+
+# Needed to create the release and upload its assets.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # macos-latest is arm64 (Apple Silicon) — the target this project is
+    # developed and verified against. An Intel build needs `macos-15-intel`, and
+    # a universal one needs both targets plus a lipo step; neither is set up.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Stamp the tag's version into the manifests
+        run: 'node .github/stamp-version.mjs "${GITHUB_REF_NAME#v}"'
+
+      - run: npm ci
+
+      # Before publishing, not after: the suite is cheap and a red release is
+      # not. Two of its tests are machine smoke tests and skip on a runner with
+      # no local `dsh` — see docs/DESIGN.md.
+      - name: Unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "DSH Desktop ${{ github.ref_name }}"
+          releaseDraft: false
+          prerelease: false
+          releaseBody: |
+            DeepSeek Harness 的桌面客户端：用系统 WebView 包起来，复用你本机已装的
+            `dsh` 与 `~/.dsh` 配置。不重写界面、不自带浏览器引擎。
+
+            ## 下载
+
+            **这份构建面向 Apple Silicon（arm64），Intel Mac 用不了。**
+
+            下载下面的 `.dmg`，打开后把 App 拖进 `/Applications`。
+
+            产物未签名，首次打开会被 Gatekeeper 拦一次，清掉隔离标记即可：
+
+            ```sh
+            xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
+            ```
+
+            ## 运行要求
+
+            - macOS
+            - Node.js ≥ 22.15（harness 的核心插件在模块顶层从 `node:zlib` 具名导入 Zstd
+              编解码器，缺它连模块都加载不了）
+            - 已安装 `@deepseek-ai/dsh`：`npm i -g @deepseek-ai/dsh`
+
+            应用会自己在 fnm / nvm / Homebrew 等常见位置找一个合格版本的 Node；`PATH` 上
+            排在前面但版本过旧的会被跳过。
+
+            ## 这个壳做什么
+
+            - **和 CLI 完全同源**：跑的就是本机那个 `dsh`，版本、插件、模型配置永远和命令行一致
+            - **一个服务端，两个视图**：`dsh web` 已在跑就附着上去，浏览器与窗口共享同一条事件流
+            - **配置零重复**：凭据、会话、技能、设置全部读 `~/.dsh`
+            - **打开就能用**：端口被占、拿不到 token、没有日志，都不需要先做任何事
+            - **不装后台机制**：没有常驻服务、没有登录自启，只在窗口开着的时候占端口
+
+            详见 [README](https://github.com/windery/dsh-desktop-tauri#readme)。
+
+            > 非官方社区项目，与 DeepSeek 不存在隶属、合作、授权或背书关系。

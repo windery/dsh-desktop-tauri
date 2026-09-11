@@ -254,9 +254,16 @@ zstd 具名导出，不是别的。）
 cd src-tauri && cargo test
 ```
 
-除了解析、版本排序、cookie 格式的单测，还有三个测试守住本项目的成立前提：
+除了解析、版本排序、cookie 格式这类纯逻辑单测，还有三个测试守住本项目的成立前提：
 
 - `finds_the_harness_this_shell_is_meant_to_reuse` —— 本机能找到 dsh
-- `mints_a_cookie_the_harness_accepts` —— 密钥与 cookie 格式可复现（端口可用
-  `DSH_TEST_PORT` 覆盖，因为 authority 是签进 payload 的，回放必须对准签发时的端口）
+- `mints_a_well_formed_session_cookie` —— cookie 格式可复现（端口可用 `DSH_TEST_PORT`
+  覆盖，因为 authority 是签进 payload 的，回放必须对准签发时的端口）
 - `never_claims_the_electron_owned_profile` —— 不碰 `desktop`
+
+前两个是**本机冒烟测试**，不是代码单测：它们要求本机装了 `dsh`、且有 `~/.dsh` 凭据。这类
+前置条件不是改代码能满足的，所以缺了就**打印原因并跳过** —— 否则 CI 上永远跑不过，而一个
+永远红的测试提供的信息量是零。
+
+`picks_an_interpreter_the_harness_can_run_on` 反过来保持严格：它依赖的 node 是仓库自己
+声明的前置条件（README 里列了），失败意味着环境没搭对，是**可行动的**，不该被静默跳过。
