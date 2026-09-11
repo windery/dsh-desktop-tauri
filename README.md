@@ -83,6 +83,43 @@ GUI 应用从 Finder 启动时只继承 launchd 的最小 `PATH`
 
 设 `DSH_DESKTOP_PORT=0` 可退回「每次随机端口、自己起服务」的老行为，代价是放弃共享。
 
+### 让那个服务常驻
+
+两种路径的启动手感差很多，值得知道为什么：
+
+| 3080 上有没有服务 | 打开窗口时发生什么 | 体感 |
+| --- | --- | --- |
+| 有（常驻服务 / 你手动起的） | 壳直接附着，一个窗口 + 一次加载 | 几乎立刻 |
+| 没有 | 壳起一个，等它打印出地址 | 要多等一次 harness 启动 |
+
+实测 harness 冷启动稳定在 **约 3.0 秒**（三次 2.97 / 2.97 / 3.01），这段由 Node 加载插件树
+决定，壳本身无法优化掉——**唯一能省掉它的办法就是让服务先在那儿等着**。
+
+所以想常驻的话，把它交给 launchd（用绝对路径、不要走 fnm 的 multishell shim——那是每个
+shell 一份的临时链接，shell 一关就失效）：
+
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/绝对路径/bin/node</string>
+  <string>/绝对路径/lib/node_modules/@deepseek-ai/dsh/lib/bin.js</string>
+  <string>--profile</string><string>web</string>
+  <string>--no-open</string><string>--port</string><string>3080</string>
+</array>
+<key>WorkingDirectory</key><string>/你的家目录</string>
+<key>EnvironmentVariables</key>
+<dict><key>PATH</key><string>/绝对路径/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+```
+
+三个容易漏的点：`WorkingDirectory` 必须显式钉死（默认 workspace 根就是进程的 cwd，不钉
+的话 launchd 会给成 `/`）；`PATH` 必须给全（launchd 不读 shell 配置，agent 派生的工具要
+靠它）；`ProgramArguments` 必须全绝对路径。
+
+注意这时候**别让桌面端和它抢端口**——壳的看门狗发现端口没人服务就会自己起一个补上。切换
+期间端口本来就会短暂空着，两边会抢。所以做这种切换时先退出桌面端，切完再开。
+
 ## 鉴权：壳自己签 cookie，不需要 token
 
 `dsh web` 的 `/` 不带凭证返回 **401**，启动时它会打印：
