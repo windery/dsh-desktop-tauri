@@ -166,8 +166,8 @@ cd src-tauri && cargo test   # 单元测试
 | --- | --- |
 | `src-tauri/src/backend.rs` | 找到 `dsh`、探测端口、起服务、签发会话 cookie |
 | `src-tauri/src/main.rs` | 窗口生命周期、菜单、启动与恢复流程 |
-| `ui/index.html` | 启动画面 |
-| `scripts/make-icon.mjs` | 生成图标（无依赖） |
+| `ui/index.html` | 启动画面（其中的 `ui/icon.png` 是图标的一份副本） |
+| `src-tauri/icons/` | 图标资源；`source.png` 是待展开的 1024 源图 |
 
 设计取舍、实测数据，以及每个反直觉决定的理由，都在 [`docs/DESIGN.md`](docs/DESIGN.md)。
 
