@@ -443,15 +443,22 @@ fn find_on_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 
 /// The Node releases the harness can actually run on.
 ///
-/// Two upstream floors, and Zstd is the higher of them: `node:zlib` only grew
-/// `createZstdCompress` / `createZstdDecompress` — the codecs the session store
-/// is built on — in 22.15 (23.8 on the odd-numbered line), and `node:util` only
-/// grew `parseEnv`, which is imported at boot, in 20.12.
+/// Two upstream floors, and both are raised by **top-level ESM imports** rather
+/// than by anything optional:
 ///
-/// Picking an interpreter that misses either floor fails *inside* the harness: a
-/// `SyntaxError` about a missing export, or an undefined function during session
-/// I/O, with nothing in the message mentioning Node. This shell chose the
-/// interpreter, so this shell is where that has to be caught.
+/// - `node:zlib` only grew `createZstdCompress` / `createZstdDecompress` in
+///   22.15 (23.8 on the odd-numbered line), and a core plugin imports them by
+///   name at module scope. ES modules resolve named imports at *link* time, so a
+///   runtime without those exports cannot even load that plugin — it fails
+///   before any session is read or written. That is why this is a floor and not
+///   something a lazy path could work around: a fresh install with zero sessions
+///   fails identically.
+/// - `node:util` only grew `parseEnv`, which is imported at boot, in 20.12.
+///   Zstd is the higher of the two.
+///
+/// Either way the failure lands *inside* the harness, as a `SyntaxError` naming
+/// an export and never mentioning Node. This shell chose the interpreter, so
+/// this shell is where that has to be caught.
 fn node_is_supported(major: u64, minor: u64) -> bool {
     match major {
         22 => minor >= 15,
@@ -550,8 +557,9 @@ pub fn resolve_node() -> Result<PathBuf, String> {
             if !node_is_supported(major, minor) {
                 return Err(format!(
                     "DSH_DESKTOP_NODE points at {} — that is v{major}.{minor}, and the harness \
-                     needs Node 22.15 or newer (23.8+ on the 23 line): its sessions are Zstd \
-                     frames, and `node:zlib` only gained those codecs there",
+                     needs Node 22.15 or newer (23.8+ on the 23 line): a core plugin imports \
+                     `node:zlib`'s Zstd codecs by name at module scope, so a runtime without them \
+                     cannot even load it",
                     path.display()
                 ));
             }
@@ -564,8 +572,9 @@ pub fn resolve_node() -> Result<PathBuf, String> {
         .find(|candidate| node_is_usable(candidate))
         .ok_or_else(|| {
             format!(
-                "the harness needs Node 22.15 or newer (its sessions are Zstd frames), and no \
-                 usable node was found. Candidates: {}",
+                "the harness needs Node 22.15 or newer (a core plugin imports `node:zlib`'s Zstd \
+                 codecs at module scope, so a runtime without them cannot load it), and no usable \
+                 node was found. Candidates: {}",
                 describe_nodes()
             )
         })

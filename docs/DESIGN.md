@@ -193,16 +193,30 @@ GUI 应用从 Finder 启动时只继承 launchd 的最小 `PATH`（`/usr/bin:/bi
 
 ### 解释器版本门槛
 
-harness 有两个上游硬性下限，更高的那个是 **Node 22.15**：会话用 Zstd 帧存储，而
-`node:zlib` 的 `createZstdCompress` / `createZstdDecompress` 到 22.15 才有（23 线则是
-23.8）。另一个是 `node:util` 的 `parseEnv`——启动即 import——需要 20.12，被前者覆盖。
+harness 的两个硬性下限都来自**顶层的 ESM 具名导入**，而不是某个可选的运行时特性：
 
-用低于下限的解释器，失败发生在 harness **内部**，而且报错完全不提 Node。这是在 v20.10 上
-实测到的原文：
+- `node:zlib` 的 `createZstdCompress` / `createZstdDecompress` 到 22.15 才有（23 线是
+  23.8），而一个核心插件在模块顶层按名字导入它们：
+
+  ```js
+  import { constants, createZstdCompress, createZstdDecompress, zstdCompress, zstdDecompress, zstdDecompressSync } from "node:zlib";
+  ```
+
+  **ESM 的具名导入在链接期解析**，所以运行时没有这些导出时，这个插件**根本加载不了** ——
+  在任何会话被读写之前就失败。这正是它构成「门槛」而不是能靠懒加载绕开的原因：全新安装、
+  零会话，一样失败。
+- `node:util` 的 `parseEnv`（启动即 import）需要 20.12，被前者覆盖。
+
+两者失败都发生在 harness **内部**，报错只提某个导出名、完全不提 Node。v20.10 上的实测原文：
 
 ```
-SyntaxError: The requested module 'node:util' does not provide an export named 'parseEnv'
+SyntaxError: The requested module 'node:zlib' does not provide an export named 'createZstdCompress'
 ```
+
+（对照：同一个文件里只导入 `constants`，v20.10 下立刻正常 —— 说明差异确实来自这几个
+zstd 具名导出，不是别的。）
+
+这些符号也确实被调用（不是死导入）：会话就是以 `.jsonl.zstd` 帧存储的。
 
 解释器是壳选的，所以必须在壳里拦住。规则：
 
