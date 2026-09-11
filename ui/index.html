@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>DSH Desktop</title>
+    <style>
+      :root {
+        --brand: #4d6bfe;
+        --bg: #16171d;
+        --fg: #e6e7ea;
+        --muted: #8b8f9a;
+        --danger: #ff6b6b;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+          system-ui, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      main {
+        width: min(520px, 82vw);
+        text-align: center;
+      }
+      .mark {
+        width: 64px;
+        height: 64px;
+        margin: 0 auto 22px;
+        border-radius: 16px;
+        background: var(--brand);
+        display: grid;
+        place-items: center;
+        font: 600 26px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #fff;
+        letter-spacing: -1px;
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 17px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+      }
+      .status {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        min-height: 1.6em;
+      }
+      .bar {
+        margin: 20px auto 0;
+        width: 180px;
+        height: 3px;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.08);
+        overflow: hidden;
+      }
+      .bar span {
+        display: block;
+        width: 40%;
+        height: 100%;
+        border-radius: 2px;
+        background: var(--brand);
+        animation: slide 1.15s ease-in-out infinite;
+      }
+      @keyframes slide {
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(350%);
+        }
+      }
+      .detail {
+        margin: 22px auto 0;
+        max-height: 34vh;
+        overflow: auto;
+        text-align: left;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 8px;
+        padding: 12px 14px;
+        display: none;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      .detail.on {
+        display: block;
+      }
+      .failed .mark {
+        background: var(--danger);
+      }
+      .failed .bar {
+        display: none;
+      }
+      .failed .status {
+        color: var(--fg);
+      }
+      .hint {
+        margin: 14px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        display: none;
+      }
+      .failed .hint {
+        display: block;
+      }
+      kbd {
+        font: inherit;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 4px;
+        padding: 1px 5px;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="root">
+      <div class="mark">&gt;_</div>
+      <h1>DSH Desktop</h1>
+      <p class="status" id="status">正在启动 Harness…</p>
+      <div class="bar"><span></span></div>
+      <pre class="detail" id="detail"></pre>
+      <p class="hint">
+        按 <kbd>⌘⇧R</kbd> 重试，或检查 <code>~/.dsh</code> 下的配置。
+      </p>
+    </main>
+
+    <script>
+      const root = document.getElementById("root");
+      const status = document.getElementById("status");
+      const detail = document.getElementById("detail");
+      let elapsed = 0;
+      const phases = [
+        [4000, "正在启动 Harness…"],
+        [12000, "正在加载插件…"],
+        [25000, "仍在启动，首次运行会慢一些…"],
+        [50000, "启动时间偏长，请再稍候…"],
+      ];
+      const timer = setInterval(() => {
+        elapsed += 1000;
+        for (let i = phases.length - 1; i >= 0; i--) {
+          if (elapsed >= phases[i][0]) {
+            status.textContent = phases[i][1];
+            break;
+          }
+        }
+      }, 1000);
+
+      window.__dshRestarting = () => {
+        clearInterval(timer);
+        root.classList.remove("failed");
+        detail.classList.remove("on");
+        detail.textContent = "";
+        status.textContent = "正在重启 Harness…";
+        document.querySelector(".bar").style.display = "";
+      };
+
+      window.__dshFailed = (message) => {
+        clearInterval(timer);
+        root.classList.add("failed");
+        status.textContent = "Harness 启动失败";
+        detail.textContent = message;
+        detail.classList.add("on");
+      };
+    </script>
+  </body>
+</html>

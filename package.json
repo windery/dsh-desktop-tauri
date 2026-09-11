@@ -1,0 +1,14 @@
+{
+  "name": "dsh-desktop-tauri",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Native Tauri shell for DeepSeek Harness that reuses the local dsh installation and ~/.dsh configuration",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  }
+}
