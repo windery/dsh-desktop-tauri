@@ -12,7 +12,7 @@ use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -441,15 +441,134 @@ fn find_on_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
         .find(|candidate| is_executable(candidate))
 }
 
-/// Resolve a Node binary.
-pub fn resolve_node() -> Option<PathBuf> {
-    if let Some(explicit) = env::var_os("DSH_DESKTOP_NODE") {
-        let path = PathBuf::from(explicit);
-        if path.is_file() {
-            return Some(path);
-        }
+/// The Node releases the harness can actually run on.
+///
+/// Two upstream floors, and Zstd is the higher of them: `node:zlib` only grew
+/// `createZstdCompress` / `createZstdDecompress` — the codecs the session store
+/// is built on — in 22.15 (23.8 on the odd-numbered line), and `node:util` only
+/// grew `parseEnv`, which is imported at boot, in 20.12.
+///
+/// Picking an interpreter that misses either floor fails *inside* the harness: a
+/// `SyntaxError` about a missing export, or an undefined function during session
+/// I/O, with nothing in the message mentioning Node. This shell chose the
+/// interpreter, so this shell is where that has to be caught.
+fn node_is_supported(major: u64, minor: u64) -> bool {
+    match major {
+        22 => minor >= 15,
+        23 => minor >= 8,
+        24.. => true,
+        _ => false,
     }
-    find_on_dirs("node", &binary_dirs())
+}
+
+/// Ask one binary for its version. `None` when it will not answer at all.
+fn probe_node(node: &Path) -> Option<(u64, u64)> {
+    let output = Command::new(node)
+        .arg("--version")
+        // A path that turned out not to be Node must not be able to block the
+        // boot thread waiting on stdin.
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut parts = text.trim().trim_start_matches('v').split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Whether a binary may be used at all.
+///
+/// A probe that fails is *not* a rejection: a wrapper or an unusual build that
+/// does not answer `--version` still gets the benefit of the doubt, and the
+/// harness will report whatever it thinks. Only a version we actually read and
+/// know to be too old is refused, because nothing runs on it.
+fn node_is_usable(node: &Path) -> bool {
+    match probe_node(node) {
+        Some((major, minor)) => node_is_supported(major, minor),
+        None => true,
+    }
+}
+
+/// Every distinct `node` on the search path, in preference order.
+fn node_candidates() -> Vec<PathBuf> {
+    let mut identities: Vec<PathBuf> = Vec::new();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for dir in binary_dirs() {
+        let candidate = dir.join("node");
+        if !is_executable(&candidate) {
+            continue;
+        }
+        // Version-manager shims and symlinks all point at one interpreter, so
+        // probing every spelling of it would only repeat the same answer.
+        let identity = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+        if identities.contains(&identity) {
+            continue;
+        }
+        identities.push(identity);
+        candidates.push(candidate);
+    }
+    candidates
+}
+
+/// Describe every Node found, for a failure report.
+fn describe_nodes() -> String {
+    let candidates = node_candidates();
+    if candidates.is_empty() {
+        return "none found".to_string();
+    }
+    candidates
+        .iter()
+        .map(|candidate| match probe_node(candidate) {
+            Some((major, minor)) => format!("{} (v{major}.{minor})", candidate.display()),
+            None => format!("{} (would not report a version)", candidate.display()),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The interpreter to run the CLI with.
+///
+/// `DSH_DESKTOP_NODE` wins outright. Otherwise this returns the first Node on
+/// the search path the harness can actually run on — **scanning rather than
+/// taking the first hit**, because an old Node earlier on `PATH` (a stale system
+/// install, an abandoned nvm default) must not shadow a suitable one sitting
+/// further down the list.
+pub fn resolve_node() -> Result<PathBuf, String> {
+    if let Some(explicit) = env::var_os("DSH_DESKTOP_NODE") {
+        let path = PathBuf::from(&explicit);
+        if !path.is_file() {
+            return Err(format!(
+                "DSH_DESKTOP_NODE points at {}, which is not a file",
+                path.display()
+            ));
+        }
+        if let Some((major, minor)) = probe_node(&path) {
+            if !node_is_supported(major, minor) {
+                return Err(format!(
+                    "DSH_DESKTOP_NODE points at {} — that is v{major}.{minor}, and the harness \
+                     needs Node 22.15 or newer (23.8+ on the 23 line): its sessions are Zstd \
+                     frames, and `node:zlib` only gained those codecs there",
+                    path.display()
+                ));
+            }
+        }
+        return Ok(path);
+    }
+
+    node_candidates()
+        .into_iter()
+        .find(|candidate| node_is_usable(candidate))
+        .ok_or_else(|| {
+            format!(
+                "the harness needs Node 22.15 or newer (its sessions are Zstd frames), and no \
+                 usable node was found. Candidates: {}",
+                describe_nodes()
+            )
+        })
 }
 
 /// Resolve how to start the harness, in priority order:
@@ -473,11 +592,8 @@ pub fn resolve() -> Result<BackendCmd, String> {
                         "DSH_DESKTOP_BACKEND is set to {raw}, but that file does not exist"
                     ));
                 }
-                let node = resolve_node().ok_or_else(|| {
-                    format!(
-                        "DSH_DESKTOP_BACKEND is set to {raw}, but no node binary was found; set DSH_DESKTOP_NODE"
-                    )
-                })?;
+                let node = resolve_node()
+                    .map_err(|why| format!("DSH_DESKTOP_BACKEND is set to {raw}, but {why}"))?;
                 return Ok(BackendCmd::Node { node, entry: path });
             }
             if !is_executable(&path) {
@@ -489,20 +605,40 @@ pub fn resolve() -> Result<BackendCmd, String> {
         }
     }
 
+    // One probe pass up front. The answer does not depend on which root we are
+    // looking at, and not re-probing keeps a failure report to a single opinion.
+    let interpreter = resolve_node();
+    // An interpreter that was named is a decision, not a hint. If it cannot run
+    // the harness, say so — falling through to a different one would honour the
+    // setting by ignoring it, which is the hardest kind of configuration
+    // problem to notice.
+    let explicit = env::var_os("DSH_DESKTOP_NODE").is_some();
+    if explicit {
+        if let Err(why) = &interpreter {
+            return Err(why.clone());
+        }
+    }
+    let mut found_entry: Option<PathBuf> = None;
+
     for root in install_roots() {
         let entry = root.join(CLI_ENTRY_REL);
-        if entry.is_file() {
-            let sibling = root.join("bin/node");
-            let node = if sibling.is_file() {
-                sibling
-            } else {
-                resolve_node().ok_or_else(|| {
-                    format!(
-                        "found the harness at {} but no node binary; set DSH_DESKTOP_NODE",
-                        entry.display()
-                    )
-                })?
-            };
+        if !entry.is_file() {
+            continue;
+        }
+        found_entry = Some(entry.clone());
+
+        // The interpreter shipped beside this install is the natural pairing,
+        // but a pairing is a convenience, not a requirement: any suitable node
+        // runs a JS program. So a root whose own node is too old does not
+        // disqualify its dsh — keeping the newest dsh and finding an interpreter
+        // that can run it beats skipping to an older install.
+        let sibling = root.join("bin/node");
+        let node = if !explicit && is_executable(&sibling) && node_is_usable(&sibling) {
+            Some(sibling)
+        } else {
+            interpreter.as_ref().ok().cloned()
+        };
+        if let Some(node) = node {
             return Ok(BackendCmd::Node { node, entry });
         }
     }
@@ -511,11 +647,21 @@ pub fn resolve() -> Result<BackendCmd, String> {
         return Ok(BackendCmd::Exec(dsh));
     }
 
-    Err(format!(
-        "no dsh installation found. Install it with `npm i -g @deepseek-ai/dsh`, \
-         or point DSH_DESKTOP_BACKEND at its lib/bin.js. Searched {} locations.",
-        install_roots().len() + 1
-    ))
+    Err(match found_entry {
+        // A dsh was there; the half that was missing is an interpreter.
+        Some(entry) => format!(
+            "found the harness at {} but no interpreter that can run it: {}",
+            entry.display(),
+            interpreter
+                .err()
+                .unwrap_or_else(|| "set DSH_DESKTOP_NODE to name one".to_string())
+        ),
+        None => format!(
+            "no dsh installation found. Install it with `npm i -g @deepseek-ai/dsh`, or point \
+             DSH_DESKTOP_BACKEND at its lib/bin.js. {}",
+            interpreter.err().unwrap_or_default()
+        ),
+    })
 }
 
 /// A PATH for the child that includes every directory we know how to search,
@@ -758,5 +904,41 @@ mod tests {
         // `desktop` is reserved for the official Electron app; the CLI refuses
         // to boot it, so the default here must never collide.
         assert_ne!(DEFAULT_PROFILE, "desktop");
+    }
+
+    #[test]
+    fn refuses_the_node_releases_the_harness_cannot_run_on() {
+        // Both boundaries are upstream facts and both are load-bearing: Zstd
+        // arrives at 22.15 and again at 23.8, and the 23 line skips 23.0-23.7
+        // entirely, which is exactly what a naive ">= 22.15" comparison would
+        // get wrong.
+        assert!(!node_is_supported(20, 10));
+        // 20.12 has `parseEnv` but still no Zstd, so it is not enough either.
+        assert!(!node_is_supported(20, 12));
+        assert!(!node_is_supported(21, 7));
+        assert!(!node_is_supported(22, 14));
+        assert!(node_is_supported(22, 15));
+        assert!(node_is_supported(22, 99));
+        assert!(!node_is_supported(23, 0));
+        assert!(!node_is_supported(23, 7));
+        assert!(node_is_supported(23, 8));
+        assert!(node_is_supported(24, 0));
+        assert!(node_is_supported(25, 1));
+    }
+
+    #[test]
+    fn picks_an_interpreter_the_harness_can_run_on() {
+        // The point of scanning: the chosen node must satisfy the floor, not
+        // merely be the first one on `PATH`. Run this with an old node prepended
+        // to PATH to watch it skip past that one.
+        let node = resolve_node().expect("a usable node should be discoverable here");
+        let (major, minor) =
+            probe_node(&node).expect("the chosen interpreter should report a version");
+        println!("chosen interpreter: {} v{major}.{minor}", node.display());
+        assert!(
+            node_is_supported(major, minor),
+            "chose {} v{major}.{minor}, which the harness cannot run on",
+            node.display()
+        );
     }
 }

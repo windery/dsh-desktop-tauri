@@ -191,6 +191,36 @@ GUI 应用从 Finder 启动时只继承 launchd 的最小 `PATH`（`/usr/bin:/bi
 看不到 fnm / nvm / Homebrew。所以上面这些位置是**显式枚举**的，并且会把找到 node 的目录
 前置进子进程的 `PATH`，让 agent 派生的工具也能解析到。
 
+### 解释器版本门槛
+
+harness 有两个上游硬性下限，更高的那个是 **Node 22.15**：会话用 Zstd 帧存储，而
+`node:zlib` 的 `createZstdCompress` / `createZstdDecompress` 到 22.15 才有（23 线则是
+23.8）。另一个是 `node:util` 的 `parseEnv`——启动即 import——需要 20.12，被前者覆盖。
+
+用低于下限的解释器，失败发生在 harness **内部**，而且报错完全不提 Node。这是在 v20.10 上
+实测到的原文：
+
+```
+SyntaxError: The requested module 'node:util' does not provide an export named 'parseEnv'
+```
+
+解释器是壳选的，所以必须在壳里拦住。规则：
+
+- 每个候选都跑一次 `node --version` 探测，**跳过不达标的继续往后找** —— 一个老 node 排在
+  `PATH` 前面（遗留的系统安装、废弃的 nvm 默认）不该遮住后面合适的那个。这是本项目修掉的
+  一个真实缺口：原先取的是 `binary_dirs()` 里第一个 `node`，而 `PATH` 排在最前，所以旧
+  版本会直接胜出。
+- 探测失败的候选**不算被拒**。不回应 `--version` 的包装脚本仍给机会，让 harness 自己报；
+  只有**确实读到**版本且低于下限才拒绝。
+- 落在某个安装根旁边的解释器是自然配对，但**配对只是便利**：任何合格 node 都能跑 JS 程序。
+  所以某个根的 node 太旧**不会**否决它的 `dsh` —— 保住最新的 dsh、另找一个能跑它的解释器，
+  比退到更旧的安装要好。
+- `DSH_DESKTOP_NODE` 是**决定而非提示**：它不合格就直接报错，而不是悄悄换一个用。配置被
+  "遵守"的方式是被忽略，是最难察觉的那类问题。
+
+开销：本机去重后只有 2 个候选（v24.11.1 与 v20.10.0），单个探测约 17 ms，`resolve()` 整体
+约 30 ms —— 相对 harness 约 3.0 秒的启动可以忽略。
+
 ## 图标
 
 鲸鱼由 `scripts/make-icon.mjs` 生成：无依赖、可复现，跑一次得到 1024×1024 的

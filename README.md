@@ -31,7 +31,7 @@
 ## 环境要求
 
 - **macOS**。目前只在 macOS 26 / Apple Silicon 上验证过；代码避开了 macOS 专有 API，其他平台理论上可用，但未经测试。
-- **Node.js ≥ 22.15**。harness 的会话用 Zstd 存储，`node:zlib` 到 22.15 才有 `createZstdDecompress`。
+- **Node.js ≥ 22.15**。harness 的会话用 Zstd 存储，`node:zlib` 到 22.15 才有那套编解码器。应用会自己在常见安装位置里挑一个合格的——`PATH` 上排在前面但版本过旧的会被跳过，不需要你先去清理。
 - **已安装 `@deepseek-ai/dsh`**：
 
   ```sh
