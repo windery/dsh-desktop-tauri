@@ -17,7 +17,7 @@ function sdRoundRect(px, py, cx, cy, halfW, halfH, radius) {
   return Math.hypot(ax, ay) + Math.min(Math.max(qx, qy), 0) - radius;
 }
 
-/** Signed distance to the capsule with the given half-width. */
+/** Signed distance to a capsule with the given half-width. */
 function sdCapsule(px, py, ax, ay, bx, by, halfWidth) {
   const pax = px - ax;
   const pay = py - ay;
@@ -27,14 +27,95 @@ function sdCapsule(px, py, ax, ay, bx, by, halfWidth) {
   return Math.hypot(pax - bax * h, pay - bay * h) - halfWidth;
 }
 
-/** The `>_` prompt glyph, drawn as strokes and one bar. */
-function glyphDistance(x, y) {
-  const STROKE = 41;
-  const chevronTop = sdCapsule(x, y, 352, 372, 486, 512, STROKE);
-  const chevronBottom = sdCapsule(x, y, 486, 512, 352, 652, STROKE);
-  // The underscore is a rounded bar, expressed as a very short capsule.
-  const bar = sdCapsule(x, y, 546, 662, 706, 662, 34);
-  return Math.min(chevronTop, chevronBottom, bar);
+/** Signed distance to a circle. */
+function sdCircle(px, py, cx, cy, radius) {
+  return Math.hypot(px - cx, py - cy) - radius;
+}
+
+/**
+ * Signed distance to an axis-aligned ellipse. Exact along both axes and a close
+ * approximation between them, which the supersampling below hides.
+ */
+function sdEllipse(px, py, cx, cy, rx, ry) {
+  return (Math.hypot((px - cx) / rx, (py - cy) / ry) - 1) * Math.min(rx, ry);
+}
+
+/** The same ellipse, rotated by `angle` radians about its own centre. */
+function sdEllipseRot(px, py, cx, cy, rx, ry, angle) {
+  const cos = Math.cos(-angle);
+  const sin = Math.sin(-angle);
+  const dx = px - cx;
+  const dy = py - cy;
+  const lx = dx * cos - dy * sin;
+  const ly = dx * sin + dy * cos;
+  return (Math.hypot(lx / rx, ly / ry) - 1) * Math.min(rx, ry);
+}
+
+/**
+ * Fit of the drawing to the plate.
+ *
+ * The whale is drawn in its own convenient coordinates, which leaves it sitting
+ * high (its own centre is near y=462) and a little small for an app icon. These
+ * map that drawing onto the plate so it lands centred and fills it the way a
+ * macOS icon wants — scaled, not merely translated, so the proportions hold.
+ */
+const GLYPH_SCALE = 1.05;
+const GLYPH_ORIGIN_Y = 462;
+
+/**
+ * Polynomial smooth minimum. Where a plain `Math.min` union leaves the seam
+ * between two solids visible as a crease — which is exactly what made an early
+ * whale look like two circles stacked — this blends them with a fillet of
+ * radius about `k`, so the body reads as one organic mass.
+ */
+function smin(a, b, k) {
+  const h = Math.max(k - Math.abs(a - b), 0) / k;
+  return Math.min(a, b) - h * h * k * 0.25;
+}
+
+/**
+ * A whale, assembled from rounded solids and blended into one silhouette.
+ *
+ * Deliberately an original mark rather than a redraw of anyone's logo: the blue
+ * plate carries the brand association, and the whale only has to read as one.
+ *
+ * The blend radii are the whole trick. A large one fuses the head and rear
+ * ovals into a single tapering body with no waist; a small one grows the flukes
+ * and fin out of that body like limbs while keeping the notch between the two
+ * flukes sharp, since that notch is what says "whale tail" rather than "ears".
+ * The pectoral flipper is deliberately short and swept back — a long one
+ * hanging below the body reads as a leg and makes the whale look stood up.
+ *
+ * The eye is punched back out to the plate colour — a hole, not a dark dot, so
+ * it stays crisp down to 32px.
+ */
+function glyphDistance(px, py) {
+  const DEG = Math.PI / 180;
+  // Fuses the body's own parts; large enough to erase the seam between them.
+  const BODY = 130;
+  // Grows appendages out of the body; small enough to keep the tail's notch.
+  const LIMB = 58;
+
+  const x = 512 + (px - 512) / GLYPH_SCALE;
+  const y = 512 + (py - GLYPH_ORIGIN_Y) / GLYPH_SCALE;
+
+  const head = sdEllipse(x, y, 358, 430, 245, 196);
+  const rear = sdEllipse(x, y, 588, 432, 168, 140);
+  let whale = smin(head, rear, BODY);
+
+  const stalk = sdCapsule(x, y, 618, 432, 714, 432, 70);
+  whale = smin(whale, stalk, LIMB);
+
+  const flukeUp = sdEllipseRot(x, y, 810, 350, 112, 74, -40 * DEG);
+  const flukeDown = sdEllipseRot(x, y, 810, 514, 112, 74, 40 * DEG);
+  // Blend the two flukes to each other only lightly, so the notch survives.
+  whale = smin(whale, smin(flukeUp, flukeDown, 26), LIMB);
+
+  const fin = sdEllipseRot(x, y, 470, 600, 80, 38, 45 * DEG);
+  whale = smin(whale, fin, LIMB);
+
+  const eye = sdCircle(x, y, 268, 380, 30);
+  return Math.max(whale, -eye);
 }
 
 const pixels = Buffer.alloc(SIZE * SIZE * 4);

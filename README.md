@@ -176,9 +176,24 @@ cargo test
 `mints_a_cookie_the_harness_accepts`（密钥与 cookie 格式可复现）、
 `never_claims_the_electron_owned_profile`（不碰 `desktop`）。
 
+## 图标
+
+鲸鱼由 `scripts/make-icon.mjs` 生成：无依赖、可复现，跑一次得到 1024×1024 的
+`source.png`，再用 `npx tauri icon` 展开成各平台尺寸。`tauri icon` 会顺带生成
+Android / iOS 目录，对这个 macOS 壳没用，删掉即可（仓库里没有保留）。
+
+造型上没有画路径，而是把几个圆角实体**平滑并集（smooth-min）**成一整块。硬叠会在
+交界处留下一道折痕，看起来像两个圆摞在一起——第一版就是这样，一眼像鱼。融合半径是
+全部诀窍：大的那个把头部和身体融成没有「腰」的整体；小的那个让尾鳍和胸鳍像肢体一样
+长出来，同时保住两片尾鳍之间的**凹口**，那个凹口才是「鲸鱼尾巴」而不是「耳朵」的
+关键。胸鳍刻意短而后掠，长的垂在身下会读成一条腿，让鲸鱼显得站着。
+
+刻意画的是原创造型而非复刻任何一家的商标：品牌联想由蓝色底板承担，鲸鱼只需要让人
+认出是鲸鱼。
+
+启动画面 `ui/index.html` 里是同一只鲸鱼，用 SVG 的 **blur + alpha 阈值** 复现同样的
+融合效果——省掉一条要手工维护的路径。
+
 ## 许可证
 
 [MIT](LICENSE)。
-
-图标是 `scripts/make-icon.mjs` 生成的（无依赖，可复现），只保留桌面端需要的那几个；
-需要 Windows 或移动端图标时用 `npx tauri icon` 重新展开即可。

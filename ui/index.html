@@ -43,9 +43,12 @@
         background: var(--brand);
         display: grid;
         place-items: center;
-        font: 600 26px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
-        color: #fff;
-        letter-spacing: -1px;
+        overflow: hidden;
+      }
+      .mark svg {
+        display: block;
+        width: 100%;
+        height: 100%;
       }
       h1 {
         margin: 0 0 6px;
@@ -131,7 +134,35 @@
   </head>
   <body>
     <main id="root">
-      <div class="mark">&gt;_</div>
+      <div class="mark">
+        <!-- The same whale as the app icon, drawn from the same overlapping
+             solids. Blurring the group and then thresholding its alpha is the
+             SVG equivalent of the smooth-min the icon script uses, so the body
+             fuses into one mass here too without a hand-maintained path. -->
+        <svg viewBox="0 0 1024 1024" aria-hidden="true">
+          <defs>
+            <filter id="whale-goo" x="-25%" y="-25%" width="150%" height="150%">
+              <feGaussianBlur stdDeviation="30" result="blur" />
+              <feColorMatrix
+                in="blur"
+                mode="matrix"
+                values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 24 -11"
+              />
+            </filter>
+          </defs>
+          <g transform="translate(512 512) scale(1.05) translate(-512 -462)">
+            <g filter="url(#whale-goo)" fill="#ffffff">
+              <ellipse cx="358" cy="430" rx="245" ry="196" />
+              <ellipse cx="588" cy="432" rx="168" ry="140" />
+              <rect x="548" y="362" width="236" height="140" rx="70" />
+              <ellipse cx="810" cy="350" rx="112" ry="74" transform="rotate(-40 810 350)" />
+              <ellipse cx="810" cy="514" rx="112" ry="74" transform="rotate(40 810 514)" />
+              <ellipse cx="470" cy="600" rx="80" ry="38" transform="rotate(45 470 600)" />
+            </g>
+            <circle cx="268" cy="380" r="30" fill="#4d6bfe" />
+          </g>
+        </svg>
+      </div>
       <h1>DSH Desktop</h1>
       <p class="status" id="status">正在启动 Harness…</p>
       <div class="bar"><span></span></div>
