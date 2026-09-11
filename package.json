@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "Native Tauri shell for DeepSeek Harness that reuses the local dsh installation and ~/.dsh configuration",
+  "license": "MIT",
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",

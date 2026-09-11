@@ -175,3 +175,10 @@ cargo test
 `finds_the_harness_this_shell_is_meant_to_reuse`（本机能找到 dsh）、
 `mints_a_cookie_the_harness_accepts`（密钥与 cookie 格式可复现）、
 `never_claims_the_electron_owned_profile`（不碰 `desktop`）。
+
+## 许可证
+
+[MIT](LICENSE)。
+
+图标是 `scripts/make-icon.mjs` 生成的（无依赖，可复现），只保留桌面端需要的那几个；
+需要 Windows 或移动端图标时用 `npx tauri icon` 重新展开即可。
