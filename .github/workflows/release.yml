@@ -48,7 +48,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "DSH Desktop ${{ github.ref_name }}"
+          releaseName: "DeepSeek Harness Desktop ${{ github.ref_name }}"
           releaseDraft: false
           prerelease: false
           releaseBody: |
@@ -64,7 +64,7 @@ jobs:
             产物未签名，首次打开会被 Gatekeeper 拦一次，清掉隔离标记即可：
 
             ```sh
-            xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
+            xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness Desktop.app"
             ```
 
             ## 运行要求

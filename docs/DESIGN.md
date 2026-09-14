@@ -35,13 +35,19 @@ Tauri 省掉的是「自带一个浏览器引擎」这份分发与内存开销�
 | 情况 | 行为 |
 | --- | --- |
 | 端口空闲 | 自己起 `dsh web --profile web --port 3080` |
-| 端口被占 | **附着**上去，不起第二个进程 |
+| 端口上是 `dsh web` | **附着**上去，不起第二个进程 |
+| 端口上是别的程序 | 报错并停下 —— 附着会把陌生页面装进窗口，硬起会撞 EADDRINUSE |
+
+"端口被占"的问法不是"有没有人监听"，而是"监听的是不是 harness"：一次 TCP 连接分不出来，
+而 3080 是常见端口。判别依据是 harness 自己的未认证应答（`401` + `dsh web authentication
+required`），见 `probe_port`。
 
 附着是重点：浏览器和窗口从此是**同一个服务端**——同一个 origin、同一条事件流、同一份
 会话 cookie。所以一边新建的会话、发出去的消息，另一边是**实时的**，不需要轮询，也不需要
 插件。用户自己起的 `dsh web` 永远不被打扰，窗口只是变成它的第二个视图。
 
-设 `DSH_DESKTOP_PORT=0` 可退回「每次随机端口、自己起服务」的老行为，代价是放弃共享。
+端口必须**固定**：附着、看门狗、自签 cookie 都指向同一个端口值，所以没有"随机端口"的
+逃生口。`DSH_DESKTOP_PORT=0` 或任何无效值一律按默认端口处理。
 
 ### 不干扰契约
 
@@ -95,28 +101,36 @@ dsh web: http://127.0.0.1:<port>/?token=<launch-token>
 带这个 token 的请求会种下 cookie 并 303 跳到干净的 `/`。**但这个 token 只出现在服务自己的
 stdout 上**——别人起的服务读不到。
 
-所以壳不去找 token，它**自己签一个**。关键在于 cookie 的签名密钥：
+所以壳不去找 token，它**自己签一个** —— 这是本项目的设计，不是绕开上游的临时手段。cookie 的
+audience 是 `host:port`，**与 token 无关**；密钥持久化在共享 harness home 的凭据库里
+（`~/.dsh/.credentials.yaml`），任何本机客户端都读得到。于是窗口附着到用户自己起的服务上时，
+不需要 token、不需要日志、不需要用户做任何事。
 
-- 持久化在共享 harness home 的凭据库里（`~/.dsh/.credentials.yaml`），任何客户端都能读；
-- cookie 的 audience 是 `host:port`，**与 token 无关**。
+（另一条路是自带一份 harness、连服务都自己起 —— 那样 token 就在手上，完全不必碰凭据库，代价是
+失去"窗口与终端 CLI 永远同源"这个前提。作为 `dsh web` 的平替，这里选复用本机那份。）
 
 壳照 harness 的格式现签一个 —— `v1.<base64url(payload)>.<base64url(HMAC-SHA256)>` ——
-用 Tauri 的 `Webview::set_cookie` 装进 webview，再重新发起请求。
+装进 webview 再重新发起请求。
 
-两个必须对上的细节，猜错任何一个都会签出服务端不认的 cookie：
+**三个前提。** 算法本身是自足的、与 stdout 无关；但前两条它保证不了：
 
-1. 凭据库里存的密钥是 **base64url 文本**，要先解码成 32 字节原始密钥再当 HMAC key。
-   harness 的 `canonicalSecret()` 就是这么做的。
-2. payload 的生命周期 `expiresAt - issuedAt` 不能超过 harness 的 `cookieMaxAgeDays`
-   （默认 30 天），否则 `isAuthenticated` 直接判否。壳用 29 天。
+1. **密钥必须是服务端加载的那一个** —— 即两边解析出同一个 `$DSH_HOME`。这是唯一算法无法保证的
+   条件：home 不同则密钥不同，签得再对也必被拒。它也是唯一"读 stdout 反而能救"的场景，
+   因为 token 与密钥无关。
+2. **`authority` 必须与实际加载的地址一致** —— cookie 名是
+   `cookiePrefix + b64url(sha256(authority))`，payload 里也带 authority，两处都要匹配。所以加载
+   地址必须始终是 `127.0.0.1:<port>`；改成 `localhost` 会同时废掉两处，直接 401。
+3. 格式细节：库里的密钥是 **base64url 文本**，要先解码成 32 字节原始密钥再当 HMAC key
+   （harness 的 `canonicalSecret()` 就是这么做的）；生命周期 `expiresAt - issuedAt` 不能超过
+   `cookieMaxAgeDays`（默认 30 天），壳用 29 天。
 
 于是启动路径是：
 
 | 情况 | 行为 |
 | --- | --- |
 | 端口空闲 | 自己起服务，用它的 token 加载（token 在手上，最直接） |
-| 端口被占 | 现签 cookie 装进 webview —— **没有 token 也进得去** |
-| 凭据库读不到 | 退回读日志（`~/.dsh/dsh-web.log`、`dsh-web-launchd.log`）里的 token，再退回裸 URL |
+| 端口上是 `dsh web` | 现签 cookie，**验证通过后**才装进 webview —— 没有 token 也进得去 |
+| 签出来的 cookie 被拒 | 换更短的有效期再签一次；两次都不过就在启动画面说明原因，不静默停在 401 页 |
 
 三项实测（都对着真实服务跑过）：
 
@@ -124,8 +138,16 @@ stdout 上**——别人起的服务读不到。
 - 全新端口（webview 里不可能有它的 cookie）、零 token 参与 → 自动认证，2 条 ESTABLISHED
 - 对着手动裸跑、无日志、无历史 cookie 的 3080 → 自动认证成功
 
-> 边界：若某个 profile 把 `cookieMaxAgeDays` 调到低于 29 天，签名会被拒，此时自动退回
-> token / 裸 URL 路径——不会崩，只是可能回到需要凭证的状态。
+**为什么签完必须验证。** 不验证的话，一个服务端不认的 cookie 就是一个停在 401 页、却什么
+都不解释的窗口 —— 对"有服务就能用"这个目标来说，最糟的失败不是做不到，而是做不到还说不清。
+验证把静默失败变成已知失败。也正因为有验证，`cookieMaxAgeDays` 被调低这件事**不需要**壳去
+读 profile 配置：先用 29 天试，被拒就换 1 天再试 —— **试出来比读出来少一层上游格式耦合**。
+
+壳**不再**去读 `dsh-web.log` / `dsh-web-launchd.log` 找 token：那要求用户事先 `tee` 过，不满足
+"零用户动作"。README 里那条 `tee` 配方保留 —— 它服务的是**浏览器**换 cookie 的场景，与壳无关。
+
+> 边界：若签名两次都被拒（最可能是那个服务用了不同的 `DSH_HOME`，两边 secret 不同），
+> 壳会在启动画面说明原因并停下，而不是打开一个用不了的 401 页面。`⌘⇧R` 可重试。
 
 ## 配置与数据归属
 
@@ -150,16 +172,40 @@ CLI 会直接拒绝启动。
 注意：如果有人**同时**改插件，`dsh plugin` 会动 profile 的 `node_modules`，两个进程都需要
 重启才能看到变化。
 
-## 四个实现决定
+## 五个实现决定
 
 **用创建窗口而不是 `navigate()`。** 最初实现对 splash 窗口调用
 `WebviewWindow::navigate(url)`，实测 webview 从未发起过连接（harness 端口上零连接）。
 改成直接以 `WebviewUrl::External` **创建**主窗口，连接立即正常建立（可见 SSE + API 两条
 ESTABLISHED）。导航到跨源地址这条路径在 macOS WKWebView 上不可靠。
 
-**自己签 cookie，而不是找 token。** 见上文。这是唯一一个依赖上游内部格式的地方，所以它
-设计成**可失败**：读不到密钥就退回 token，token 也没有就退回裸 URL，任何一步失败都只是
-降级，不会让窗口打不开。
+**自己签 cookie，而不是找 token。** 见上文。这是唯一一个依赖上游内部格式的地方。它的失败
+面比看起来小：凭据文件是 `dsh web` 启动时**急切写入**的（`client-connection` 激活时
+`BrowserAuth.create` → `initializeSecret`），且服务端在 URL 公告**之前**就已把它落盘，所以
+"读不到密钥"在公告后的服务上不可达。剩下的失败只有一类：**服务端加载的 `DSH_HOME` 与壳读的
+不是同一个**，签得再对也必被拒 —— 那时壳在启动画面说明原因并停下，而不是打开一个用不了的
+401 页面（见上文「为什么签完必须验证」）。
+
+**ESC 不当"退出全屏"用。** 原生全屏下按 ESC 会退出全屏，这是 AppKit 的
+`NSWindow.cancelOperation:` —— 壳里没有这个处理器（全仓没有 ESC 相关代码）。问题出在**网页的
+ESC 处理器不声明"这个键我用了"**：它们有 23 处（`Modal` / `Menu` / 设置面板 / 目录选择器 …），
+都是按表面挂载的，且只有 6 处调 `preventDefault()`。于是这个键看起来没被处理，继续沿响应链
+上浮到窗口，一次按键干了两件事。
+
+壳的做法是**在页面侧把它标记为已消费**：建窗时用 `initialization_script` 注入一个 capture
+阶段的 `keydown`，对 ESC 只调 `preventDefault()`、**不调** `stopPropagation()`。页面自己的
+处理器照常收到键、照常关弹窗，被挡掉的只有 AppKit 那一半。`initialization_script` 在每次顶层
+导航都会重跑，所以刷新和页内跳转都不会把它丢掉。
+
+这条路径**还没有实测**：它成立的前提是 WebKit 在 DOM 事件 `preventDefault()` 之后不再把该键
+交给响应链，而这是运行时属性，静态分析给不出答案。按一下就知道 —— 原生全屏下不打开任何弹窗
+按 ESC：不退全屏即成立。
+
+**若它不成立**，退路依次是：① 原生 `NSEvent` 局部监听吞掉 ESC，再把合成的 `keydown` 派发回
+页面（保住全屏，代价是多一处原生代码，且合成事件不 trusted）；② 干脆不让窗口进原生全屏
+（`ns_window()` + `objc2-app-kit` 把 `FullScreenPrimary` 换成 `FullScreenNone`，代码已写过一版
+并撤掉）。②零未知，但绿灯只做 zoom。**否决过的第三条路是"在壳里拦下 ESC 不往页面传"**：那会
+让 ESC 变成无操作，弹窗照样关不掉，比现状更差。
 
 **看门狗：附着的服务死了就自己接管。** 附着的 `dsh web` 不归壳管——用户关掉那个终端，
 服务就跟着走了，窗口会一直停在死页面上，除非用户恰好知道 ⌘⇧R。壳自己起的服务也可能这样

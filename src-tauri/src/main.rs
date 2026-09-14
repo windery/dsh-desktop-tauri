@@ -1,4 +1,5 @@
-//! DSH Desktop — a thin Tauri shell around the user's own harness install.
+//! DeepSeek Harness Desktop — a thin Tauri shell around the user's own harness
+//! install.
 //!
 //! The shell renders nothing of its own beyond a boot screen. It resolves the
 //! user's `dsh`, boots one private profile on a loopback port, and hands the
@@ -16,6 +17,10 @@ use std::time::Duration;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::webview::cookie::{Cookie, SameSite};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+
+/// The name shown in the window title, the app menu and the boot screen. The
+/// full product name: `dsh` is the CLI's shorthand and never the app's name.
+const APP_NAME: &str = "DeepSeek Harness Desktop";
 
 /// The boot screen, shown while the harness starts.
 const SPLASH_LABEL: &str = "splash";
@@ -82,7 +87,7 @@ fn main() {
                 .accelerator("CmdOrCtrl+Shift+R")
                 .build(app)?;
 
-            let app_menu = SubmenuBuilder::new(app, "DSH Desktop")
+            let app_menu = SubmenuBuilder::new(app, APP_NAME)
                 .about(None)
                 .separator()
                 .hide()
@@ -122,7 +127,7 @@ fn main() {
             _ => {}
         })
         .build(tauri::generate_context!())
-        .expect("failed to build DSH Desktop");
+        .expect("failed to build DeepSeek Harness Desktop");
 
     app.run(|handle, event| {
         if let RunEvent::ExitRequested { .. } = event {
@@ -146,7 +151,7 @@ fn build_splash(app: &tauri::AppHandle) -> tauri::Result<()> {
         SPLASH_LABEL,
         WebviewUrl::App(SPLASH_PAGE.into()),
     )
-    .title("DSH Desktop")
+    .title(APP_NAME)
     .inner_size(560.0, 360.0)
     .resizable(false)
     .center()
@@ -187,31 +192,65 @@ fn boot(app: tauri::AppHandle) {
 
     let port = backend::web_port();
 
-    let (url, cookie) = if backend::is_listening(port) {
-        match backend::mint_session_cookie(port) {
+    let (url, cookie) = match backend::probe_port(port) {
+        backend::PortState::Harness => match backend::attach_cookie(port) {
             Some(cookie) => (format!("http://127.0.0.1:{port}/"), Some(cookie)),
-            // No readable secret: fall back to a logged launch token, and then
-            // to the cookie already in the webview.
-            None => (backend::attach_url(port), None),
-        }
-    } else {
-        let profile = backend::profile_name();
-        match backend::start(&profile, port, backend::BOOT_TIMEOUT) {
-            Ok(server) => {
-                let url = server.url.clone();
-                let state = app.state::<Shell>();
-                let mut guard = state.backend_slot();
-                if let Some(mut previous) = guard.take() {
-                    previous.terminate();
-                }
-                *guard = Some(server);
-                (url, None)
-            }
-            Err(error) => {
-                report(&app, &error);
+            // A harness is there but it refused every cookie the shell minted.
+            // Loading the bare URL anyway would land the window on its 401 page
+            // with nothing to explain it, and the webview's own cookie is no
+            // rescue: it is signed with the same secret, so a mismatch that
+            // rejected the mint rejects that too. Say what happened instead.
+            None => {
+                report(
+                    &app,
+                    &format!(
+                        "a `dsh web` is serving port {port}, but this window could not \
+                         authenticate to it.\n\n\
+                         Most likely that server was started with a different DSH_HOME \
+                         than this app reads, so the signing secret differs. Otherwise \
+                         its profile sets `cookieMaxAgeDays` unusually low.\n\n\
+                         The URL that server printed carries a token that works in a \
+                         browser. DSH_DESKTOP_PORT moves this window to another port."
+                    ),
+                );
                 RESTARTING.store(false, Ordering::SeqCst);
                 return;
             }
+        },
+        backend::PortState::Free => {
+            let profile = backend::profile_name();
+            match backend::start(&profile, port, backend::BOOT_TIMEOUT) {
+                Ok(server) => {
+                    let url = server.url.clone();
+                    let state = app.state::<Shell>();
+                    let mut guard = state.backend_slot();
+                    if let Some(mut previous) = guard.take() {
+                        previous.terminate();
+                    }
+                    *guard = Some(server);
+                    (url, None)
+                }
+                Err(error) => {
+                    report(&app, &error);
+                    RESTARTING.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
+        }
+        // A stranger on the port: attaching would put its page in the window,
+        // and booting would collide with it. Name the situation instead of
+        // silently picking one of those.
+        backend::PortState::Other => {
+            report(
+                &app,
+                &format!(
+                    "port {port} is held by a program that is not `dsh web`.\n\
+                     Quit that program, or start this window on another port with \
+                     DSH_DESKTOP_PORT=<port>."
+                ),
+            );
+            RESTARTING.store(false, Ordering::SeqCst);
+            return;
         }
     };
 
@@ -324,10 +363,11 @@ fn open_main(
     }
 
     let window = WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::External(url))
-        .title("DSH Desktop")
+        .title(APP_NAME)
         .inner_size(1280.0, 840.0)
         .min_inner_size(760.0, 520.0)
         .center()
+        .initialization_script(ESCAPE_IS_HANDLED)
         .build()?;
 
     if let Some((name, value)) = cookie {
@@ -357,6 +397,29 @@ fn open_main(
     }
     Ok(())
 }
+
+/// Mark ESC as handled, so macOS does not read it as "leave fullscreen".
+///
+/// The web interface does handle ESC — 23 handlers across its plugins, from the
+/// settings panel to the directory picker — but they are mounted per surface and
+/// most never call `preventDefault`. So the key looks unhandled, and an
+/// unhandled ESC reaches AppKit's `NSWindow.cancelOperation:`, which drops the
+/// window out of native fullscreen: one press, two actions.
+///
+/// This runs at document start, in the capture phase, and deliberately calls
+/// only `preventDefault` — *not* `stopPropagation`. The interface's own handlers
+/// still receive the key and still close their dialog; only the AppKit half is
+/// suppressed.
+///
+/// Installed through `initialization_script`, which Tauri runs on every
+/// top-level navigation, so a reload or an in-page navigation keeps it.
+const ESCAPE_IS_HANDLED: &str = r#"
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+  }
+}, true);
+"#;
 
 /// Show a failure on the boot screen, falling back to stderr when it is gone.
 fn report(app: &tauri::AppHandle, message: &str) {

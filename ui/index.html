@@ -2,7 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <title>DSH Desktop</title>
+    <title>DeepSeek Harness Desktop</title>
     <style>
       :root {
         --brand: #4d6bfe;
@@ -138,7 +138,7 @@
              served to the webview. -->
         <img src="icon.png" alt="" />
       </div>
-      <h1>DSH Desktop</h1>
+      <h1>DeepSeek Harness Desktop</h1>
       <p class="status" id="status">正在启动 Harness…</p>
       <div class="bar"><span></span></div>
       <pre class="detail" id="detail"></pre>
@@ -151,31 +151,14 @@
       const root = document.getElementById("root");
       const status = document.getElementById("status");
       const detail = document.getElementById("detail");
-      let elapsed = 0;
-      const phases = [
-        [4000, "正在启动 Harness…"],
-        [12000, "正在加载插件…"],
-        [25000, "仍在启动，首次运行会慢一些…"],
-        [50000, "启动时间偏长，请再稍候…"],
-      ];
+      // The shell has no progress to report: the harness announces its URL once,
+      // at the very end. Show the only thing actually known — how long we have
+      // been waiting — rather than narrating stages nobody reported.
+      const started = Date.now();
       const timer = setInterval(() => {
-        elapsed += 1000;
-        for (let i = phases.length - 1; i >= 0; i--) {
-          if (elapsed >= phases[i][0]) {
-            status.textContent = phases[i][1];
-            break;
-          }
-        }
+        const seconds = Math.round((Date.now() - started) / 1000);
+        status.textContent = `正在启动 Harness…（${seconds}s）`;
       }, 1000);
-
-      window.__dshRestarting = () => {
-        clearInterval(timer);
-        root.classList.remove("failed");
-        detail.classList.remove("on");
-        detail.textContent = "";
-        status.textContent = "正在重启 Harness…";
-        document.querySelector(".bar").style.display = "";
-      };
 
       window.__dshFailed = (message) => {
         clearInterval(timer);

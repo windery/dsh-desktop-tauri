@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -158,23 +158,94 @@ pub fn web_port() -> u16 {
         .unwrap_or(DEFAULT_WEB_PORT)
 }
 
-/// Whether something already serves that loopback port.
+/// Whether anything at all is answering on that loopback port.
 ///
-/// A completed TCP connect is the whole test. Reachability is the only question
-/// worth asking: the harness answers an unauthenticated request with 401 rather
-/// than closing the socket, so a connect that succeeds means a `dsh web` owns
-/// the port, and one that fails means the port is free.
+/// A completed TCP connect is the whole test — deliberately cheap, because the
+/// watchdog polls it. It answers *liveness*, not identity: a connect that
+/// succeeds says the port is occupied, not that a `dsh web` owns it. Use
+/// [`probe_port`] before deciding to attach.
 pub fn is_listening(port: u16) -> bool {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     TcpStream::connect_timeout(&address, Duration::from_millis(400)).is_ok()
 }
 
-/// Files a supervised `dsh web` leaves its startup line in, nearest first.
+/// The sentence a harness returns to any unauthenticated request.
 ///
-/// Two names because the two ways the harness outlives a terminal disagree:
-/// `dsh-web.log` is what a `tee` on a manual launch writes, and
-/// `dsh-web-launchd.log` is where the LaunchAgent's stdout lands.
-const ANNOUNCEMENT_LOGS: [&str; 2] = ["dsh-web.log", "dsh-web-launchd.log"];
+/// Verified against a running `dsh web`: `GET /` answers `401` with
+/// `dsh web authentication required; reopen the URL printed by dsh web.`
+/// An unrelated listener answers something else, or nothing at all.
+const HARNESS_UNAUTHENTICATED_MARKER: &str = "dsh web authentication required";
+
+/// How long a probe waits for each leg of the exchange.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(600);
+
+/// How much of a response to keep before judging it.
+const PROBE_READ_LIMIT: usize = 8 * 1024;
+
+/// Connect to the shared loopback port, or `None` when nothing is listening.
+fn connect(port: u16) -> Option<TcpStream> {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let stream = TcpStream::connect_timeout(&address, PROBE_TIMEOUT).ok()?;
+    let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+    Some(stream)
+}
+
+/// Send `GET /` and return as much of the response as arrives.
+///
+/// Accumulates by hand rather than through `read_to_string`: that discards
+/// everything already received whenever the read ends in an error, and a read
+/// that ends in a timeout is exactly what a slow or keep-alive peer produces.
+fn fetch_root(stream: &mut TcpStream, port: u16, cookie: Option<&(String, String)>) -> String {
+    let credential = match cookie {
+        Some((name, value)) => format!("Cookie: {name}={value}\r\n"),
+        None => String::new(),
+    };
+    let request =
+        format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{credential}Connection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return String::new();
+    }
+    let mut seen: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while seen.len() < PROBE_READ_LIMIT {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => seen.extend_from_slice(&chunk[..read]),
+        }
+    }
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+/// What is holding the shared loopback port.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PortState {
+    /// Nothing is listening; the shell may boot a harness there.
+    Free,
+    /// A harness `dsh web` is serving; the shell attaches to it.
+    Harness,
+    /// Something else is listening. Attaching would put a stranger's page in the
+    /// window, and booting would collide on the port, so the caller reports
+    /// instead of guessing.
+    Other,
+}
+
+/// Classify what holds `port` by asking it, not by assuming.
+///
+/// `DEFAULT_WEB_PORT` is a common port, so "something is listening" is not the
+/// same question as "a harness is listening". The discriminator is the
+/// harness's own unauthenticated answer; every other outcome is `Other`, and the
+/// only outcome that permits booting is `Free`.
+pub fn probe_port(port: u16) -> PortState {
+    let Some(mut stream) = connect(port) else {
+        return PortState::Free;
+    };
+    if fetch_root(&mut stream, port, None).contains(HARNESS_UNAUTHENTICATED_MARKER) {
+        PortState::Harness
+    } else {
+        PortState::Other
+    }
+}
 
 fn dsh_home() -> PathBuf {
     env::var_os("DSH_HOME")
@@ -182,57 +253,16 @@ fn dsh_home() -> PathBuf {
         .unwrap_or_else(|| home_dir().join(".dsh"))
 }
 
-/// Recover the launch token a server on this port announced earlier.
-///
-/// A token is only ever printed to stdout, so a server this shell did not start
-/// is reachable without a cookie only if something kept that line — a
-/// supervised service, or a shell that piped the output to a file. Reading the
-/// *last* announcement for the port matters: every restart mints a fresh token
-/// and invalidates the one before it. A stale token is harmless — the harness
-/// falls through to the cookie check — so a miss here costs nothing.
-fn discover_token(port: u16) -> Option<String> {
-    let needle = format!("http://127.0.0.1:{port}/?token=");
-    let home = dsh_home();
-    for name in ANNOUNCEMENT_LOGS {
-        let Ok(text) = fs::read_to_string(home.join(name)) else {
-            continue;
-        };
-        let Some(found) = text.rfind(&needle) else {
-            continue;
-        };
-        let token: String = text[found + needle.len()..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .collect();
-        if !token.is_empty() {
-            return Some(token);
-        }
-    }
-    None
-}
-
-/// The URL to load for a server this shell did not start.
-///
-/// With a recoverable token the load authenticates outright and mints the
-/// session cookie. Without one the bare URL still works whenever that cookie is
-/// already in the webview: it is signed with the secret kept in the shared
-/// harness home, so it is not invalidated by restarting the server.
-pub fn attach_url(port: u16) -> String {
-    match discover_token(port) {
-        Some(token) => format!("http://127.0.0.1:{port}/?token={token}"),
-        None => format!("http://127.0.0.1:{port}/"),
-    }
-}
-
-/// Cookie lifetime for a minted session.
+/// Cookie lifetimes to try, longest first.
 ///
 /// Two constraints pull in opposite directions: the harness rejects a payload
 /// whose lifetime exceeds its own `cookieMaxAgeDays` (default 30), and a window
-/// left open must outlive its cookie. 29 days sits just under the default, so
-/// it satisfies the first while comfortably covering the second. If a profile
-/// lowers `cookieMaxAgeDays`, minting is refused by the harness and the shell
-/// falls back to the launch token.
-const COOKIE_LIFETIME_MILLIS: i64 = 29 * 24 * 60 * 60 * 1000;
+/// left open must outlive its cookie. 29 days sits just under the default, so it
+/// satisfies the first while comfortably covering the second. A profile that
+/// lowered `cookieMaxAgeDays` would refuse that payload, so a conservative day
+/// follows it: the shell learns the ceiling by asking rather than by reading the
+/// profile's config, which would couple it to another upstream format.
+const COOKIE_LIFETIMES_MILLIS: [i64; 2] = [29 * 24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000];
 
 fn base64_url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -242,8 +272,8 @@ fn base64_url(bytes: &[u8]) -> String {
 ///
 /// The credentials file is plain YAML and this key is the only `secret` under
 /// the `client-connection/browser-session` record, so an anchored line scan is
-/// enough — no YAML dependency, and a miss is harmless because every caller
-/// treats it as "fall back to the token".
+/// enough — no YAML dependency, and a miss is harmless: the caller falls back to
+/// loading the root URL, which the webview may already be authenticated for.
 fn read_cookie_secret() -> Option<String> {
     let text = fs::read_to_string(dsh_home().join(".credentials.yaml")).ok()?;
     let mut inside = false;
@@ -294,16 +324,29 @@ fn read_cookie_secret() -> Option<String> {
 
 /// Mint the browser-session cookie the harness would have issued itself.
 ///
-/// This is what makes opening the window always work. A `dsh web` this shell
-/// did not start announces its launch token only on its own stdout, so without
-/// a log there is nothing to read — but the cookie is not bound to that token,
-/// only to the secret in the shared harness home, which any client can read.
-/// Minting the same cookie therefore authenticates without a token, without a
-/// log, and without a single thing for the user to do.
+/// This is what makes attaching to a server this shell did not start work. Such
+/// a server announces its launch token only on its own stdout, so there is
+/// nothing readable to reuse — but the cookie is not bound to that token, only
+/// to the secret in the shared harness home, which any local client can read.
+/// Minting the same cookie therefore authenticates without a token and without a
+/// single thing for the user to do.
+///
+/// Two conditions sit outside this function, and neither is one correct signing
+/// can recover from:
+///
+/// * The secret read here must be the one the *server* loaded, which holds
+///   exactly when both processes resolved the same `DSH_HOME`. A mismatch is the
+///   one failure that always rejects the cookie — and the one case where a
+///   launch token would have rescued the attach, since a token is independent of
+///   the secret.
+/// * `authority` must match the authority the window actually loads, because it
+///   keys the cookie name *and* rides inside the signed payload. Changing the
+///   loaded URL's host from `127.0.0.1` to `localhost` therefore breaks both at
+///   once, and the server answers 401.
 ///
 /// Returns the cookie name and value. The format mirrors the harness:
 /// `v1.<base64url(payload)>.<base64url(HMAC-SHA256(secret, body))>`.
-pub fn mint_session_cookie(port: u16) -> Option<(String, String)> {
+pub fn mint_session_cookie(port: u16, lifetime_millis: i64) -> Option<(String, String)> {
     let stored_secret = read_cookie_secret()?;
     // The stored value is base64url *text*; the harness decodes it to raw key
     // bytes before signing, so those same bytes have to be the HMAC key here.
@@ -311,12 +354,14 @@ pub fn mint_session_cookie(port: u16) -> Option<(String, String)> {
         .decode(stored_secret.as_bytes())
         .ok()?;
 
+    // Must stay `127.0.0.1`: this string reaches the server twice (cookie name
+    // and signed payload), and it has to equal the `Host` the window sends.
     let authority = format!("127.0.0.1:{port}");
     let issued_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_millis() as i64;
-    let expires_at = issued_at + COOKIE_LIFETIME_MILLIS;
+    let expires_at = issued_at + lifetime_millis;
 
     let payload = format!(
         "{{\"version\":1,\"authority\":\"{authority}\",\"issuedAt\":{issued_at},\"expiresAt\":{expires_at}}}"
@@ -335,6 +380,33 @@ pub fn mint_session_cookie(port: u16) -> Option<(String, String)> {
     Some((name, value))
 }
 
+/// Whether the harness accepts a request carrying this cookie.
+///
+/// The only way to know is to ask: the harness answers an authenticated `GET /`
+/// with the index, and anything it does not accept with the same 401 it gives an
+/// anonymous caller.
+fn cookie_is_accepted(port: u16, cookie: &(String, String)) -> bool {
+    let Some(mut stream) = connect(port) else {
+        return false;
+    };
+    fetch_root(&mut stream, port, Some(cookie)).starts_with("HTTP/1.1 200")
+}
+
+/// Produce a cookie the harness has actually accepted, or `None`.
+///
+/// Installing an unverified cookie is how a rejected signature becomes a window
+/// sitting on the 401 page with nothing to explain it. Verifying first makes
+/// that failure a known one — and trying each lifetime in turn lets a profile
+/// with a lower `cookieMaxAgeDays` keep working instead of costing the attach.
+pub fn attach_cookie(port: u16) -> Option<(String, String)> {
+    COOKIE_LIFETIMES_MILLIS
+        .into_iter()
+        .find_map(|lifetime| {
+            let cookie = mint_session_cookie(port, lifetime)?;
+            cookie_is_accepted(port, &cookie).then_some(cookie)
+        })
+}
+
 fn home_dir() -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -349,6 +421,19 @@ fn version_key(name: &str) -> Vec<u64> {
         .collect()
 }
 
+/// Whether `name` names a version directory such as `v24.11.1`.
+///
+/// fnm keeps a `.downloads` sibling inside `node-versions`, and any other stray
+/// directory would otherwise be sorted in as if it were an install — which is
+/// how a path that is not a Node install ends up on the child's `PATH`.
+fn is_version_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('v') else {
+        return false;
+    };
+    rest.split('.')
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
 /// Directories under `parent`, newest version first. Unreadable or absent
 /// parents yield an empty list rather than an error, because every one of
 /// these locations is optional.
@@ -361,6 +446,9 @@ fn version_dirs(parent: &PathBuf) -> Vec<PathBuf> {
         .filter(|entry| entry.path().is_dir())
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
+            if !is_version_name(&name) {
+                return None;
+            }
             Some((name, entry.path()))
         })
         .collect();
@@ -879,6 +967,35 @@ mod tests {
     }
 
     #[test]
+    fn keeps_non_version_directories_out_of_install_lists() {
+        // fnm keeps a `.downloads` sibling inside `node-versions`. Treating it
+        // as an install is how a path that is not a Node install ends up on the
+        // harness child's PATH.
+        assert!(is_version_name("v24.11.1"));
+        assert!(is_version_name("v20.10.0"));
+        assert!(!is_version_name(".downloads"));
+        assert!(!is_version_name("current"));
+        assert!(!is_version_name("v"));
+        assert!(!is_version_name("v24.11.x"));
+    }
+
+    #[test]
+    fn identifies_whatever_holds_the_shared_port() {
+        // A smoke test for *this machine*, not a unit test: the marker check is
+        // only meaningful against a real harness, and CI has none. Report what
+        // was found either way — a stranger on the port is a fact about the
+        // machine, not a regression.
+        let port = web_port();
+        match probe_port(port) {
+            PortState::Free => println!("skipped: nothing serves {port}"),
+            PortState::Harness => println!("recognised a harness serving {port}"),
+            PortState::Other => {
+                println!("note: {port} is held by something that is not `dsh web`");
+            }
+        }
+    }
+
+    #[test]
     fn finds_the_harness_this_shell_is_meant_to_reuse() {
         // A smoke test for *this machine*, not a unit test of the code. The
         // shell's premise is reusing a local installation rather than shipping
@@ -896,27 +1013,41 @@ mod tests {
     }
 
     #[test]
-    fn mints_a_well_formed_session_cookie() {
-        // Prints the cookie so it can be replayed against a live server, which
-        // is how the signature was checked against the harness's own — that
-        // check is manual, because it needs a running server. What is asserted
-        // here is the shape. The port is overridable because the authority is
-        // signed *into* the cookie, so a replay has to target the port it was
-        // minted for.
+    fn mints_a_cookie_a_live_harness_accepts() {
+        // A smoke test for *this machine*, not a unit test: the signing secret
+        // only exists once a harness has run here, and verifying a signature
+        // needs a live server. Both absences are facts about the machine, so
+        // they skip rather than fail. The port is overridable because the
+        // authority is signed *into* the cookie, so it has to be checked against
+        // the port it was minted for.
         let port: u16 = std::env::var("DSH_TEST_PORT")
             .ok()
             .and_then(|value| value.trim().parse().ok())
-            .unwrap_or(3099);
-        // The signing secret only exists once a harness has run on this machine,
-        // so a machine without one skips rather than fails.
-        match mint_session_cookie(port) {
+            .unwrap_or(DEFAULT_WEB_PORT);
+
+        match mint_session_cookie(port, COOKIE_LIFETIMES_MILLIS[0]) {
             Some((name, value)) => {
                 println!("COOKIE {name}={value}");
                 assert!(name.starts_with("dsh-auth-"));
                 assert!(value.starts_with("v1."));
                 assert_eq!(value.split('.').count(), 3);
             }
-            None => println!("skipped: no browser-session secret on this machine"),
+            None => {
+                println!("skipped: no browser-session secret on this machine");
+                return;
+            }
+        }
+
+        if probe_port(port) != PortState::Harness {
+            println!("skipped: no harness serving {port}");
+            return;
+        }
+        // The point of the rework: a minted cookie is only worth installing once
+        // a request carrying it comes back 200. Previously this replay was done
+        // by hand; now the code does it, and the test asserts it.
+        match attach_cookie(port) {
+            Some(_) => println!("the harness on {port} accepted a minted cookie"),
+            None => panic!("the harness on {port} refused every minted cookie"),
         }
     }
 

@@ -1,4 +1,4 @@
-# DSH Desktop
+# DeepSeek Harness Desktop
 
 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的界面装进一个原生窗口。用系统 WebView 渲染，复用你本机已经装好的 `dsh`，配置直接读 CLI 正在用的 `~/.dsh`。
 
@@ -12,7 +12,7 @@
 截图占位。把界面截图放到 docs/screenshot.png 后取消下面这行的注释。
 注意别把真实会话内容截进去 —— 侧边栏的会话标题、工作区路径都会暴露出去。
 
-![DSH Desktop 界面](docs/screenshot.png)
+![DeepSeek Harness Desktop 界面](docs/screenshot.png)
 -->
 
 它不是一个另写的 agent，只是一个薄壳：不重写界面、不自带浏览器引擎、不搬一套 Node 运行时。
@@ -55,7 +55,7 @@ npm run build
 **首次打开会被 Gatekeeper 拦一次**，因为构建产物没有签名。拖进 `/Applications` 后清掉隔离标记：
 
 ```sh
-xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
+xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness Desktop.app"
 ```
 
 ## 使用
@@ -86,6 +86,10 @@ xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
 | `⌘⇧R` | 重启 harness（改完插件或配置可以用它，不用退出应用） |
 | `⌘C` `⌘V` `⌘A` | 标准剪贴板操作（菜单栏里也有） |
 
+窗口**保留原生全屏**（绿灯照常用）。ESC 只做界面该做的事：关弹窗、取消编辑，**不会**把窗口
+踢出全屏。壳会在页面加载时把 ESC 标记为已消费，所以 AppKit 不再把它理解成"退出全屏"，而页面
+自己的处理器照常收到这个键。理由见[设计说明](docs/DESIGN.md#五个实现决定)。
+
 ## 配置
 
 通常不需要任何配置，窗口会自动找到你的 `dsh`。要覆盖时用环境变量：
@@ -95,13 +99,13 @@ xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
 | `DSH_DESKTOP_BACKEND` | 自动探测 | 指定 harness 入口：`.js`/`.mjs`/`.cjs` 路径（用 node 跑），或可执行文件 |
 | `DSH_DESKTOP_NODE` | 自动探测 | 指定 node 二进制，跳过搜索 |
 | `DSH_DESKTOP_PROFILE` | `web` | 使用哪个 profile；默认与本机 `dsh web` 共用 |
-| `DSH_DESKTOP_PORT` | `3080` | 共享的回环端口；被占则附着，空闲则自己起服务。设 `0` 退回随机端口 |
+| `DSH_DESKTOP_PORT` | `3080` | 共享的回环端口。端口上是 `dsh web` 则附着，空闲则自己起服务，是别的程序则报错停下。端口必须固定，`0` 与无效值一律按默认端口处理 |
 | `DSH_HOME` | `~/.dsh` | harness 数据根目录（由上游解释，本应用只透传） |
 
 从 Finder 启动的应用看不到终端环境变量，要从命令行传：
 
 ```sh
-DSH_DESKTOP_PORT=4000 open -a "DSH Desktop"
+DSH_DESKTOP_PORT=4000 open -a "DeepSeek Harness Desktop"
 ```
 
 自动探测会覆盖 fnm、nvm、Homebrew 等常见安装位置，细节见[设计说明](docs/DESIGN.md#后端探测)。
@@ -147,7 +151,7 @@ lsof -nP -iTCP:3080 -sTCP:LISTEN
 
 ```sh
 DSH_DESKTOP_BACKEND=/path/to/node_modules/@deepseek-ai/dsh/lib/bin.js \
-  open -a "DSH Desktop"
+  open -a "DeepSeek Harness Desktop"
 ```
 
 ## 开发
