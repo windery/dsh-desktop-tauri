@@ -197,9 +197,8 @@ ESC 处理器不声明"这个键我用了"**：它们有 23 处（`Modal` / `Men
 处理器照常收到键、照常关弹窗，被挡掉的只有 AppKit 那一半。`initialization_script` 在每次顶层
 导航都会重跑，所以刷新和页内跳转都不会把它丢掉。
 
-这条路径**还没有实测**：它成立的前提是 WebKit 在 DOM 事件 `preventDefault()` 之后不再把该键
-交给响应链，而这是运行时属性，静态分析给不出答案。按一下就知道 —— 原生全屏下不打开任何弹窗
-按 ESC：不退全屏即成立。
+这条路径**已实测通过**（2026-09-14，macOS）：原生全屏下按 ESC 不再退出全屏，弹窗照常关。
+它成立的前提是 WebKit 在 DOM 事件 `preventDefault()` 之后不再把该键交给响应链。
 
 **若它不成立**，退路依次是：① 原生 `NSEvent` 局部监听吞掉 ESC，再把合成的 `keydown` 派发回
 页面（保住全屏，代价是多一处原生代码，且合成事件不 trusted）；② 干脆不让窗口进原生全屏
@@ -213,9 +212,19 @@ ESC 处理器不声明"这个键我用了"**：它们有 23 处（`Modal` / `Men
 同一个地址和同一个 harness home，浏览器手里那个 origin 的会话 cookie 依然有效，所以
 **浏览器也跟着一起恢复**。
 
-三道保险防止它帮倒忙：连续两次探测失败才算死（避免瞬时抖动误判）；启动流程进行中暂不
-干预（避免打断有意的重启）；重试次数用尽就放弃（真的起不来时把它留在错误页上，而不是
-无限重启）。
+判别口径与启动路径**一致**：问的是"端口上的应答是不是 harness"（`probe_port`），不是
+"有没有人在监听"。原先用一次 TCP connect 判断，那只有在"共享端口上只可能是 harness"这个
+前提成立时才够 —— 而 3080 是常见端口，前提不成立。后果是：harness 死了、端口被别的程序
+接手时，connect 依然成功，看门狗每轮都判定"活着"，窗口就永远停在死页面上，什么也不说。
+
+三道保险防止它帮倒忙：连续两次探测失败才算死；启动流程进行中暂不干预（避免打断有意的
+重启）；重试次数用尽就放弃（真的起不来时把它留在错误页上，而不是无限重启）。
+
+**那两次探测也是"正在启动的 harness"的容错。** `dsh web` 在插件树加载期间就已绑定监听，
+而 fallback 处理器要等树加载到那一步才注册 —— 在此之前未认领的请求一律回 **404**，也就是
+说一个**正在启动**的 harness 和别人的程序在这个探针下长得一样（都是 `Other`）。所以判定
+不能只看一次：2 次 × 2.5 秒的窗口就是留给它把 fallback 挂上的。（这个盲区有单测钉着：
+`calls_a_bound_port_that_never_answers_other`。）
 
 实测：杀掉附着的服务后 **6 秒**恢复；**恢复前签的 cookie 在恢复后依然返回 200**。
 
@@ -303,7 +312,7 @@ cd src-tauri && cargo test
 除了解析、版本排序、cookie 格式这类纯逻辑单测，还有三个测试守住本项目的成立前提：
 
 - `finds_the_harness_this_shell_is_meant_to_reuse` —— 本机能找到 dsh
-- `mints_a_well_formed_session_cookie` —— cookie 格式可复现（端口可用 `DSH_TEST_PORT`
+- `mints_a_cookie_a_live_harness_accepts` —— cookie 格式可复现（端口可用 `DSH_TEST_PORT`
   覆盖，因为 authority 是签进 payload 的，回放必须对准签发时的端口）
 - `never_claims_the_electron_owned_profile` —— 不碰 `desktop`
 
@@ -313,3 +322,13 @@ cd src-tauri && cargo test
 
 `picks_an_interpreter_the_harness_can_run_on` 反过来保持严格：它依赖的 node 是仓库自己
 声明的前置条件（README 里列了），失败意味着环境没搭对，是**可行动的**，不该被静默跳过。
+
+端口三态那四条（`calls_an_empty_port_free` / `recognises_a_harness_by_its_unauthenticated_answer`
+/ `calls_a_stranger_on_the_port_other` / `calls_a_bound_port_that_never_answers_other`）
+是**真单测**：在回环上临时 bind 一个 `TcpListener` 扮演四种对端（不响应 / 回 401 + marker /
+回别的 / 连上但不回话），不需要本机装 harness。它们把上文那张"空闲 / harness / 陌生程序"的
+契约表变成可执行断言 —— 这张表是启动路径和看门狗共用的判别，值得钉住。最后一条钉的是**已知
+盲区**（正在启动的 harness 读起来也是 `Other`），谁给探针加耐心，就得连它一起改。
+
+`identifies_whatever_holds_the_shared_port` 仍是冒烟测试：它问的是**本机 3080 上现在是谁**，
+属于机器事实，不是回归。

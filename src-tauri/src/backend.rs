@@ -158,17 +158,6 @@ pub fn web_port() -> u16 {
         .unwrap_or(DEFAULT_WEB_PORT)
 }
 
-/// Whether anything at all is answering on that loopback port.
-///
-/// A completed TCP connect is the whole test — deliberately cheap, because the
-/// watchdog polls it. It answers *liveness*, not identity: a connect that
-/// succeeds says the port is occupied, not that a `dsh web` owns it. Use
-/// [`probe_port`] before deciding to attach.
-pub fn is_listening(port: u16) -> bool {
-    let address = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&address, Duration::from_millis(400)).is_ok()
-}
-
 /// The sentence a harness returns to any unauthenticated request.
 ///
 /// Verified against a running `dsh web`: `GET /` answers `401` with
@@ -924,6 +913,7 @@ fn terminate_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
 
     #[test]
     fn reads_the_loopback_url_from_a_lan_announcement() {
@@ -993,6 +983,69 @@ mod tests {
                 println!("note: {port} is held by something that is not `dsh web`");
             }
         }
+    }
+
+    /// A free loopback port, released immediately so a probe finds it empty.
+    fn released_port() -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind a free port");
+        listener.local_addr().expect("read the port").port()
+    }
+
+    /// A server on a free loopback port that answers the first request with
+    /// `response`. An empty `response` stands for a port that is bound and
+    /// accepting but never replies.
+    fn fake_server(response: &'static str) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind a free port");
+        let port = listener.local_addr().expect("read the port").port();
+        thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(response.as_bytes());
+            if response.is_empty() {
+                // Stay silent past the probe's own timeout, so the probe ends by
+                // timing out rather than by seeing the connection close.
+                thread::sleep(PROBE_TIMEOUT * 2);
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn calls_an_empty_port_free() {
+        assert_eq!(probe_port(released_port()), PortState::Free);
+    }
+
+    #[test]
+    fn recognises_a_harness_by_its_unauthenticated_answer() {
+        // The discriminator is not "someone is listening" but this exact
+        // sentence, which only a harness returns to an unauthenticated caller.
+        let port = fake_server(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n\
+             dsh web authentication required; reopen the URL printed by dsh web.\n",
+        );
+        assert_eq!(probe_port(port), PortState::Harness);
+    }
+
+    #[test]
+    fn calls_a_stranger_on_the_port_other() {
+        // Attaching here would put a stranger's page in the window, and booting
+        // would collide on the port, so this must not read as `Harness`.
+        let port = fake_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi");
+        assert_eq!(probe_port(port), PortState::Other);
+    }
+
+    #[test]
+    fn calls_a_bound_port_that_never_answers_other() {
+        // The known blind spot, pinned rather than hidden: `dsh web` binds its
+        // listener while the plugin tree is still loading, and until that tree
+        // registers the fallback the webserver answers 404 — so a harness that
+        // is merely *starting* is indistinguishable from someone else's program
+        // and reads as `Other`. Whoever teaches the probe patience has to change
+        // this assertion with it.
+        assert_eq!(probe_port(fake_server("")), PortState::Other);
     }
 
     #[test]

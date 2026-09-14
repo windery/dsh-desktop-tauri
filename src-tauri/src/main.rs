@@ -289,11 +289,22 @@ fn boot(app: tauri::AppHandle) {
 /// same address and the same harness home, the session cookie a browser already
 /// holds for that origin stays valid, so the browser comes back with it.
 ///
+/// The test is identity, not liveness — the same question the boot path asks.
+/// "Something is answering" is not enough: if the harness dies and another
+/// program takes the port, a connect still succeeds, and watching only for a
+/// connect would leave the window on a dead page with nothing to explain it.
+///
 /// Three guards keep it from doing harm: two consecutive misses are required so
 /// a momentary blip is not read as a death; the watch stands down while a boot
 /// is in flight so a deliberate restart is never interrupted; and it gives up
 /// after a few attempts, so a machine that genuinely cannot start a server is
 /// left showing its error rather than restarting forever.
+///
+/// On patience: `dsh web` binds its listener before its plugin tree has
+/// registered the fallback handler, and until it does, `GET /` answers 404, so a
+/// harness that is merely starting reads as [`backend::PortState::Other`]. That
+/// is why an `Other` reading is not acted on the first time it is seen — the
+/// two-miss rule is what makes the strict test safe to use here.
 fn watch_serving(app: tauri::AppHandle) {
     if WATCHING.swap(true, Ordering::SeqCst) {
         return;
@@ -311,7 +322,7 @@ fn watch_serving(app: tauri::AppHandle) {
         loop {
             thread::sleep(POLL);
 
-            if backend::is_listening(port) {
+            if backend::probe_port(port) == backend::PortState::Harness {
                 misses = 0;
                 // Serving again, so whatever we did worked and the budget resets.
                 recoveries = 0;
