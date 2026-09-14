@@ -2,3 +2,10 @@ node_modules/
 src-tauri/target/
 src-tauri/gen/
 .DS_Store
+
+# CodeGraph's local index: database, sockets, pid and logs, all local to one
+# machine. Its own `.codegraph/.gitignore` hides the contents but not the
+# directory, so the whole path is ignored here instead. Project-level CodeGraph
+# rules — `codegraph.json` / `.codegraphignore` — are not ignored and would be
+# committed when they exist.
+.codegraph/
